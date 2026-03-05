@@ -1,0 +1,18 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vsctasks"
+version = "0.1.0"
+description = "VSCode task runner CLI — scan, list, and execute .vscode/tasks.json tasks"
+requires-python = ">=3.11"
+dependencies = [
+    "rich>=13",
+]
+
+[project.scripts]
+vsctasks = "vsctasks.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/vsctasks"]
