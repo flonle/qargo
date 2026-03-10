@@ -1,4 +1,4 @@
-"""Filesystem traversal to find .vscode/tasks.json files."""
+"""Filesystem traversal to find .vscode/tasks.json and .vscode/launch.json files."""
 
 from __future__ import annotations
 
@@ -13,8 +13,12 @@ PRUNE_DIRS = frozenset({
 })
 
 
-def find_tasks_files(root: Path, extra_excludes: tuple[str, ...] = ()) -> list[Path]:
-    """Walk *root* and yield every .vscode/tasks.json that exists.
+def _find_vscode_file(
+    root: Path,
+    filename: str,
+    extra_excludes: tuple[str, ...] = (),
+) -> list[Path]:
+    """Walk *root* and return every .vscode/<filename> that exists.
 
     Pruning strategy (makes scanning from ~ fast):
     - Hidden directories (start with '.') are skipped entirely
@@ -33,10 +37,9 @@ def find_tasks_files(root: Path, extra_excludes: tuple[str, ...] = ()) -> list[P
             dirs.clear()
             continue
 
-        # Check for .vscode/tasks.json in the current directory
-        tasks_file = current / '.vscode' / 'tasks.json'
-        if tasks_file.is_file():
-            results.append(tasks_file)
+        vscode_file = current / '.vscode' / filename
+        if vscode_file.is_file():
+            results.append(vscode_file)
 
         # Prune directories before recursing
         dirs[:] = [
@@ -47,3 +50,13 @@ def find_tasks_files(root: Path, extra_excludes: tuple[str, ...] = ()) -> list[P
         ]
 
     return results
+
+
+def find_tasks_files(root: Path, extra_excludes: tuple[str, ...] = ()) -> list[Path]:
+    """Return all .vscode/tasks.json files under *root*."""
+    return _find_vscode_file(root, 'tasks.json', extra_excludes)
+
+
+def find_launch_files(root: Path, extra_excludes: tuple[str, ...] = ()) -> list[Path]:
+    """Return all .vscode/launch.json files under *root*."""
+    return _find_vscode_file(root, 'launch.json', extra_excludes)

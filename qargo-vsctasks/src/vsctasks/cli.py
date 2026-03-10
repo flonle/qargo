@@ -6,17 +6,27 @@ import argparse
 import sys
 from pathlib import Path
 
-from .discover import find_tasks_files
+from .discover import find_launch_files, find_tasks_files
 from .execute import execute_task
+from .launch_execute import execute_launch
+from .launch_parse import LaunchConfig, WorkspaceLaunch, parse_launch_file
 from .parse import Task, WorkspaceTasks, parse_tasks_file
+
+# Sigil that distinguishes launch config IDs from task IDs in the flat list.
+# Mirrors VSCode's own "Run Without Debugging" prefix convention.
+_LAUNCH_SIGIL = '>'
 
 
 # ---------------------------------------------------------------------------
-# Workspace disambiguation
+# ID construction / parsing
 # ---------------------------------------------------------------------------
 
 def _build_task_id(workspace_name: str, label: str) -> str:
     return f"[{workspace_name}] {label}"
+
+
+def _build_launch_id(workspace_name: str, name: str) -> str:
+    return f"[{workspace_name}] {_LAUNCH_SIGIL}{name}"
 
 
 def _parse_task_id(task_id: str) -> tuple[str, str]:
@@ -44,7 +54,7 @@ def _compute_workspace_names(
         try:
             return list(p.relative_to(root).parts)
         except ValueError:
-            return p.parts
+            return list(p.parts)
 
     # Try increasing suffix length until all names are unique
     max_depth = max((len(rel_parts(p)) for p in workspace_folders), default=1)
@@ -65,17 +75,29 @@ def _compute_workspace_names(
     return names
 
 
-def _load_all(root: Path, extra_excludes: tuple[str, ...], quiet: bool = False) -> tuple[
-    list[tuple[str, Task, WorkspaceTasks]],
-    dict[str, WorkspaceTasks],
-]:
-    """Discover and parse all tasks. Returns:
-    - list of (task_id, task, workspace_tasks)
-    - dict of workspace_folder_str -> WorkspaceTasks
+# Entry = (id, kind, obj, workspace_obj)
+#   kind: "task"   → obj: Task,         workspace_obj: WorkspaceTasks
+#   kind: "launch" → obj: LaunchConfig, workspace_obj: WorkspaceLaunch
+type _Entry = tuple[str, str, Task | LaunchConfig, WorkspaceTasks | WorkspaceLaunch]
+
+
+def _load_all(
+    root: Path,
+    extra_excludes: tuple[str, ...],
+    quiet: bool = False,
+) -> tuple[list[_Entry], dict[str, WorkspaceTasks]]:
+    """Discover and parse all tasks and launch configs. Returns:
+    - list of (entry_id, kind, obj, workspace_obj)
+    - dict of workspace_folder_str -> WorkspaceTasks  (for preLaunchTask resolution)
     """
     tasks_files = find_tasks_files(root, extra_excludes)
+    launch_files = find_launch_files(root, extra_excludes)
     if not quiet:
-        print(f"Scanned: found {len(tasks_files)} tasks.json file(s)", file=sys.stderr)
+        print(
+            f"Scanned: found {len(tasks_files)} tasks.json "
+            f"and {len(launch_files)} launch.json file(s)",
+            file=sys.stderr,
+        )
 
     workspace_tasks_map: dict[str, WorkspaceTasks] = {}
     all_wt: list[WorkspaceTasks] = []
@@ -91,15 +113,43 @@ def _load_all(root: Path, extra_excludes: tuple[str, ...], quiet: bool = False) 
         workspace_tasks_map[key] = wt
         all_wt.append(wt)
 
-    folders = [wt.workspace_folder for wt in all_wt]
-    name_map = _compute_workspace_names(folders, root)
+    all_wl: list[WorkspaceLaunch] = []
+    for lf in launch_files:
+        try:
+            wl = parse_launch_file(lf)
+        except ValueError as e:
+            if not quiet:
+                print(f"Warning: {e}", file=sys.stderr)
+            continue
+        all_wl.append(wl)
 
-    entries: list[tuple[str, Task, WorkspaceTasks]] = []
+    # Compute workspace names from all unique workspace folders
+    all_folders: list[Path] = []
+    seen_folders: set[Path] = set()
+    for wt in all_wt:
+        if wt.workspace_folder not in seen_folders:
+            all_folders.append(wt.workspace_folder)
+            seen_folders.add(wt.workspace_folder)
+    for wl in all_wl:
+        if wl.workspace_folder not in seen_folders:
+            all_folders.append(wl.workspace_folder)
+            seen_folders.add(wl.workspace_folder)
+
+    name_map = _compute_workspace_names(all_folders, root)
+
+    entries: list[_Entry] = []
+
     for wt in all_wt:
         ws_name = name_map.get(wt.workspace_folder, wt.workspace_folder.name)
         for task in wt.tasks:
-            task_id = _build_task_id(ws_name, task.label)
-            entries.append((task_id, task, wt))
+            entry_id = _build_task_id(ws_name, task.label)
+            entries.append((entry_id, 'task', task, wt))
+
+    for wl in all_wl:
+        ws_name = name_map.get(wl.workspace_folder, wl.workspace_folder.name)
+        for config in wl.configs:
+            entry_id = _build_launch_id(ws_name, config.name)
+            entries.append((entry_id, 'launch', config, wl))
 
     return entries, workspace_tasks_map
 
@@ -112,8 +162,8 @@ def cmd_list(args: argparse.Namespace) -> int:
     root = Path(args.root).resolve()
     extra = tuple(args.exclude) if args.exclude else ()
     entries, _ = _load_all(root, extra)
-    for task_id, _, _ in entries:
-        print(task_id)
+    for entry_id, _, _, _ in entries:
+        print(entry_id)
     return 0
 
 
@@ -127,39 +177,65 @@ def cmd_info(args: argparse.Namespace) -> int:
     entries, _ = _load_all(root, (), quiet=True)
 
     match = None
-    for tid, task, wt in entries:
-        if tid == task_id_arg:
-            match = (task, wt)
+    for eid, kind, obj, ws_obj in entries:
+        if eid == task_id_arg:
+            match = (kind, obj, ws_obj)
             break
 
     if match is None:
-        print(f"Error: task '{task_id_arg}' not found", file=sys.stderr)
+        print(f"Error: '{task_id_arg}' not found", file=sys.stderr)
         return 1
 
-    task, wt = match
+    kind, obj, ws_obj = match
     console = Console()
-
     table = Table(show_header=False, box=None, padding=(0, 1))
     table.add_column("Field", style="bold cyan", no_wrap=True)
     table.add_column("Value")
 
-    table.add_row("Label", task.label)
-    table.add_row("Workspace", str(wt.workspace_folder))
-    table.add_row("Type", task.type)
-    table.add_row("Command", task.command or "(none)")
-    if task.args:
-        table.add_row("Args", ' '.join(task.args))
-    table.add_row("CWD", task.cwd or "(workspace root)")
-    if task.shell:
-        table.add_row("Shell", task.shell)
-    if task.env:
-        env_str = '  '.join(f"{k}={v}" for k, v in task.env.items())
-        table.add_row("Env", env_str)
-    if task.depends_on:
-        table.add_row("DependsOn", ', '.join(task.depends_on))
-        table.add_row("DependsOrder", task.depends_order)
-    if task.group:
-        table.add_row("Group", task.group)
+    if kind == 'task':
+        task: Task = obj  # type: ignore[assignment]
+        wt: WorkspaceTasks = ws_obj  # type: ignore[assignment]
+        table.add_row("Label", task.label)
+        table.add_row("Workspace", str(wt.workspace_folder))
+        table.add_row("Type", task.type)
+        table.add_row("Command", task.command or "(none)")
+        if task.args:
+            table.add_row("Args", ' '.join(task.args))
+        table.add_row("CWD", task.cwd or "(workspace root)")
+        if task.shell:
+            table.add_row("Shell", task.shell)
+        if task.env:
+            env_str = '  '.join(f"{k}={v}" for k, v in task.env.items())
+            table.add_row("Env", env_str)
+        if task.depends_on:
+            table.add_row("DependsOn", ', '.join(task.depends_on))
+            table.add_row("DependsOrder", task.depends_order)
+        if task.group:
+            table.add_row("Group", task.group)
+
+    else:  # launch
+        config: LaunchConfig = obj  # type: ignore[assignment]
+        wl: WorkspaceLaunch = ws_obj  # type: ignore[assignment]
+        table.add_row("Name", config.name)
+        table.add_row("Workspace", str(wl.workspace_folder))
+        table.add_row("Type", config.type)
+        table.add_row("Request", config.request)
+        if config.program:
+            table.add_row("Program", config.program)
+        if config.module:
+            table.add_row("Module", config.module)
+        if config.args:
+            table.add_row("Args", ' '.join(config.args))
+        table.add_row("CWD", config.cwd or "(workspace root)")
+        if config.env:
+            env_str = '  '.join(f"{k}={v}" for k, v in config.env.items())
+            table.add_row("Env", env_str)
+        if config.env_file:
+            table.add_row("EnvFile", config.env_file)
+        if config.pre_launch_task:
+            table.add_row("PreLaunchTask", config.pre_launch_task)
+        if config.request == 'attach':
+            table.add_row("Note", "attach configs require a debugger — cannot run from shell")
 
     console.print(table)
     return 0
@@ -169,33 +245,38 @@ def cmd_run(args: argparse.Namespace) -> int:
     root = Path(args.root).resolve()
     extra = tuple(args.exclude) if args.exclude else ()
 
-    # Get task ID from positional arg or stdin
-    if args.task_id:
-        task_id_arg = args.task_id
+    # Collect IDs: from positional args or stdin (one per line)
+    if args.task_ids:
+        task_ids = args.task_ids
     else:
-        task_id_arg = sys.stdin.readline().strip()
+        task_ids = [line.strip() for line in sys.stdin if line.strip()]
 
-    if not task_id_arg:
+    if not task_ids:
         print("Error: no task ID provided (pass as argument or via stdin)", file=sys.stderr)
         return 1
 
-    entries, _ = _load_all(root, extra)
+    # Single scan for all tasks
+    entries, workspace_tasks_map = _load_all(root, extra)
 
-    # Find the matching task
-    match_task = None
-    match_wt = None
-    for tid, task, wt in entries:
-        if tid == task_id_arg:
-            match_task = task
-            match_wt = wt
-            break
+    # Build lookup map: id → (kind, obj, ws_obj)
+    entry_map = {eid: (kind, obj, ws_obj) for eid, kind, obj, ws_obj in entries}
 
-    if match_task is None:
-        print(f"Error: task '{task_id_arg}' not found", file=sys.stderr)
-        return 1
+    exit_code = 0
+    for task_id in task_ids:
+        match = entry_map.get(task_id)
+        if match is None:
+            print(f"Error: '{task_id}' not found", file=sys.stderr)
+            return 1
+        kind, obj, ws_obj = match
+        print(f"Running: {task_id}", file=sys.stderr)
+        if kind == 'task':
+            rc = execute_task(obj, ws_obj)          # type: ignore[arg-type]
+        else:
+            rc = execute_launch(obj, ws_obj, workspace_tasks_map)  # type: ignore[arg-type]
+        if rc != 0:
+            return rc   # stop on first failure
 
-    print(f"Running: {task_id_arg}", file=sys.stderr)
-    return execute_task(match_task, match_wt)
+    return exit_code
 
 
 # ---------------------------------------------------------------------------
@@ -205,11 +286,13 @@ def cmd_run(args: argparse.Namespace) -> int:
 def _make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog='vsctasks',
-        description='VSCode task runner — scan, list, and execute .vscode/tasks.json tasks',
+        description=(
+            'VSCode task runner — scan, list, and execute '
+            '.vscode/tasks.json tasks and .vscode/launch.json configs'
+        ),
     )
     subparsers = parser.add_subparsers(dest='command', required=True)
 
-    # Shared --root and --exclude options
     def add_common(p: argparse.ArgumentParser) -> None:
         p.add_argument(
             '--root',
@@ -219,7 +302,7 @@ def _make_parser() -> argparse.ArgumentParser:
         )
 
     # list
-    p_list = subparsers.add_parser('list', help='List all available tasks')
+    p_list = subparsers.add_parser('list', help='List all available tasks and launch configs')
     add_common(p_list)
     p_list.add_argument(
         '--exclude',
@@ -229,7 +312,7 @@ def _make_parser() -> argparse.ArgumentParser:
     )
 
     # run
-    p_run = subparsers.add_parser('run', help='Run a task')
+    p_run = subparsers.add_parser('run', help='Run a task or launch config')
     add_common(p_run)
     p_run.add_argument(
         '--exclude',
@@ -238,17 +321,20 @@ def _make_parser() -> argparse.ArgumentParser:
         help='Extra directory names to exclude (repeatable)',
     )
     p_run.add_argument(
-        'task_id',
-        nargs='?',
-        default=None,
+        'task_ids',
+        nargs='*',
         metavar='TASK_ID',
-        help='Task ID (e.g. "[my-repo] Build"). Reads from stdin if omitted.',
+        help=(
+            'One or more task / launch config IDs '
+            '(e.g. "[my-repo] Build" "[my-repo] >Launch Program"). '
+            'Reads one ID per line from stdin if omitted.'
+        ),
     )
 
     # info
-    p_info = subparsers.add_parser('info', help='Show task details (for fzf --preview)')
+    p_info = subparsers.add_parser('info', help='Show task/launch config details (for fzf --preview)')
     add_common(p_info)
-    p_info.add_argument('task_id', metavar='TASK_ID', help='Task ID to describe')
+    p_info.add_argument('task_id', metavar='TASK_ID', help='Task or launch config ID to describe')
 
     return parser
 
