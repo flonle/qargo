@@ -10,7 +10,7 @@ from .discover import find_launch_files, find_tasks_files
 from .execute import execute_task
 from .launch_execute import execute_compound, execute_launch
 from .launch_parse import CompoundLaunch, LaunchConfig, WorkspaceLaunch, parse_launch_file
-from .parse import Task, WorkspaceTasks, parse_tasks_file
+from .parse import WorkspaceTasks, parse_tasks_file
 
 # Sigil that distinguishes launch config IDs from task IDs in the flat list.
 # Mirrors VSCode's own "Run Without Debugging" prefix convention.
@@ -177,84 +177,20 @@ def cmd_list(args: argparse.Namespace) -> int:
 
 
 def cmd_info(args: argparse.Namespace) -> int:
-    from rich.console import Console
-    from rich.table import Table
+    import json
 
     root = Path(args.root).resolve()
     task_id_arg = args.task_id
 
     entries, _ = _load_all(root, (), quiet=True)
 
-    match = None
     for eid, kind, obj, ws_obj in entries:
         if eid == task_id_arg:
-            match = (kind, obj, ws_obj)
-            break
+            print(json.dumps(obj.raw))  # type: ignore[union-attr]
+            return 0
 
-    if match is None:
-        print(f"Error: '{task_id_arg}' not found", file=sys.stderr)
-        return 1
-
-    kind, obj, ws_obj = match
-    console = Console()
-    table = Table(show_header=False, box=None, padding=(0, 1))
-    table.add_column("Field", style="bold cyan", no_wrap=True)
-    table.add_column("Value")
-
-    if kind == 'compound':
-        compound: CompoundLaunch = obj  # type: ignore[assignment]
-        wl_c: WorkspaceLaunch = ws_obj  # type: ignore[assignment]
-        table.add_row("Name", compound.name)
-        table.add_row("Workspace", str(wl_c.workspace_folder))
-        table.add_row("Configurations", ', '.join(compound.configurations))
-
-    elif kind == 'task':
-        task: Task = obj  # type: ignore[assignment]
-        wt: WorkspaceTasks = ws_obj  # type: ignore[assignment]
-        table.add_row("Label", task.label)
-        table.add_row("Workspace", str(wt.workspace_folder))
-        table.add_row("Type", task.type)
-        table.add_row("Command", task.command or "(none)")
-        if task.args:
-            table.add_row("Args", ' '.join(task.args))
-        table.add_row("CWD", task.cwd or "(workspace root)")
-        if task.shell:
-            table.add_row("Shell", task.shell)
-        if task.env:
-            env_str = '  '.join(f"{k}={v}" for k, v in task.env.items())
-            table.add_row("Env", env_str)
-        if task.depends_on:
-            table.add_row("DependsOn", ', '.join(task.depends_on))
-            table.add_row("DependsOrder", task.depends_order)
-        if task.group:
-            table.add_row("Group", task.group)
-
-    else:  # kind == 'launch'
-        config: LaunchConfig = obj  # type: ignore[assignment]
-        wl: WorkspaceLaunch = ws_obj  # type: ignore[assignment]
-        table.add_row("Name", config.name)
-        table.add_row("Workspace", str(wl.workspace_folder))
-        table.add_row("Type", config.type)
-        table.add_row("Request", config.request)
-        if config.program:
-            table.add_row("Program", config.program)
-        if config.module:
-            table.add_row("Module", config.module)
-        if config.args:
-            table.add_row("Args", ' '.join(config.args))
-        table.add_row("CWD", config.cwd or "(workspace root)")
-        if config.env:
-            env_str = '  '.join(f"{k}={v}" for k, v in config.env.items())
-            table.add_row("Env", env_str)
-        if config.env_file:
-            table.add_row("EnvFile", config.env_file)
-        if config.pre_launch_task:
-            table.add_row("PreLaunchTask", config.pre_launch_task)
-        if config.request == 'attach':
-            table.add_row("Note", "attach configs require a debugger — cannot run from shell")
-
-    console.print(table)
-    return 0
+    print(f"Error: '{task_id_arg}' not found", file=sys.stderr)
+    return 1
 
 
 def cmd_run(args: argparse.Namespace) -> int:

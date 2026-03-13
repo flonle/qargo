@@ -30,6 +30,7 @@ class CompoundLaunch:
     name: str
     configurations: list[str]   # config names (not full IDs) within same workspace
     workspace_folder: Path
+    raw: dict
 
 
 @dataclass
@@ -95,6 +96,7 @@ def parse_launch_file(path: Path) -> WorkspaceLaunch:
             name=raw.get('name', ''),
             configurations=[str(c) for c in raw.get('configurations', [])],
             workspace_folder=workspace_folder,
+            raw=raw,
         ))
 
     return WorkspaceLaunch(

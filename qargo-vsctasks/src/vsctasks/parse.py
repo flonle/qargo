@@ -21,6 +21,7 @@ class Task:
     depends_order: str              # "sequence" | "parallel"
     group: str | None
     workspace_folder: Path
+    raw: dict
 
 
 @dataclass
@@ -130,6 +131,7 @@ def parse_tasks_file(path: Path) -> WorkspaceTasks:
             depends_order=depends_order,
             group=group,
             workspace_folder=workspace_folder,
+            raw=raw,
         ))
 
     return WorkspaceTasks(
