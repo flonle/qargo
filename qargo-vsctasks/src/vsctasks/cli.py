@@ -8,13 +8,14 @@ from pathlib import Path
 
 from .discover import find_launch_files, find_tasks_files
 from .execute import execute_task
-from .launch_execute import execute_launch
-from .launch_parse import LaunchConfig, WorkspaceLaunch, parse_launch_file
+from .launch_execute import execute_compound, execute_launch
+from .launch_parse import CompoundLaunch, LaunchConfig, WorkspaceLaunch, parse_launch_file
 from .parse import Task, WorkspaceTasks, parse_tasks_file
 
 # Sigil that distinguishes launch config IDs from task IDs in the flat list.
 # Mirrors VSCode's own "Run Without Debugging" prefix convention.
 _LAUNCH_SIGIL = '>'
+_COMPOUND_SIGIL = '>+'
 
 
 # ---------------------------------------------------------------------------
@@ -27,6 +28,10 @@ def _build_task_id(workspace_name: str, label: str) -> str:
 
 def _build_launch_id(workspace_name: str, name: str) -> str:
     return f"[{workspace_name}] {_LAUNCH_SIGIL}{name}"
+
+
+def _build_compound_id(workspace_name: str, name: str) -> str:
+    return f"[{workspace_name}] {_COMPOUND_SIGIL}{name}"
 
 
 def _parse_task_id(task_id: str) -> tuple[str, str]:
@@ -76,9 +81,10 @@ def _compute_workspace_names(
 
 
 # Entry = (id, kind, obj, workspace_obj)
-#   kind: "task"   → obj: Task,         workspace_obj: WorkspaceTasks
-#   kind: "launch" → obj: LaunchConfig, workspace_obj: WorkspaceLaunch
-type _Entry = tuple[str, str, Task | LaunchConfig, WorkspaceTasks | WorkspaceLaunch]
+#   kind: "task"     → obj: Task,           workspace_obj: WorkspaceTasks
+#   kind: "launch"   → obj: LaunchConfig,   workspace_obj: WorkspaceLaunch
+#   kind: "compound" → obj: CompoundLaunch, workspace_obj: WorkspaceLaunch
+type _Entry = tuple[str, str, Task | LaunchConfig | CompoundLaunch, WorkspaceTasks | WorkspaceLaunch]
 
 
 def _load_all(
@@ -150,6 +156,9 @@ def _load_all(
         for config in wl.configs:
             entry_id = _build_launch_id(ws_name, config.name)
             entries.append((entry_id, 'launch', config, wl))
+        for compound in wl.compounds:
+            entry_id = _build_compound_id(ws_name, compound.name)
+            entries.append((entry_id, 'compound', compound, wl))
 
     return entries, workspace_tasks_map
 
@@ -192,7 +201,14 @@ def cmd_info(args: argparse.Namespace) -> int:
     table.add_column("Field", style="bold cyan", no_wrap=True)
     table.add_column("Value")
 
-    if kind == 'task':
+    if kind == 'compound':
+        compound: CompoundLaunch = obj  # type: ignore[assignment]
+        wl_c: WorkspaceLaunch = ws_obj  # type: ignore[assignment]
+        table.add_row("Name", compound.name)
+        table.add_row("Workspace", str(wl_c.workspace_folder))
+        table.add_row("Configurations", ', '.join(compound.configurations))
+
+    elif kind == 'task':
         task: Task = obj  # type: ignore[assignment]
         wt: WorkspaceTasks = ws_obj  # type: ignore[assignment]
         table.add_row("Label", task.label)
@@ -213,7 +229,7 @@ def cmd_info(args: argparse.Namespace) -> int:
         if task.group:
             table.add_row("Group", task.group)
 
-    else:  # launch
+    else:  # kind == 'launch'
         config: LaunchConfig = obj  # type: ignore[assignment]
         wl: WorkspaceLaunch = ws_obj  # type: ignore[assignment]
         table.add_row("Name", config.name)
@@ -271,6 +287,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"Running: {task_id}", file=sys.stderr)
         if kind == 'task':
             rc = execute_task(obj, ws_obj)          # type: ignore[arg-type]
+        elif kind == 'compound':
+            rc = execute_compound(obj, ws_obj, workspace_tasks_map)  # type: ignore[arg-type]
         else:
             rc = execute_launch(obj, ws_obj, workspace_tasks_map)  # type: ignore[arg-type]
         if rc != 0:

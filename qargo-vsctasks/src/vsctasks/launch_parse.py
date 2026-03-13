@@ -26,8 +26,16 @@ class LaunchConfig:
 
 
 @dataclass
+class CompoundLaunch:
+    name: str
+    configurations: list[str]   # config names (not full IDs) within same workspace
+    workspace_folder: Path
+
+
+@dataclass
 class WorkspaceLaunch:
     configs: list[LaunchConfig]
+    compounds: list[CompoundLaunch]
     inputs: list[dict]          # raw inputs array for ${input:name} resolution
     workspace_folder: Path
 
@@ -80,8 +88,18 @@ def parse_launch_file(path: Path) -> WorkspaceLaunch:
             raw=raw,
         ))
 
+    raw_compounds = data.get('compounds', [])
+    compounds = []
+    for raw in raw_compounds:
+        compounds.append(CompoundLaunch(
+            name=raw.get('name', ''),
+            configurations=[str(c) for c in raw.get('configurations', [])],
+            workspace_folder=workspace_folder,
+        ))
+
     return WorkspaceLaunch(
         configs=configs,
+        compounds=compounds,
         inputs=inputs,
         workspace_folder=workspace_folder,
     )

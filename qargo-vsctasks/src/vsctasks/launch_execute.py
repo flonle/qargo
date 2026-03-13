@@ -7,7 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .launch_parse import LaunchConfig, WorkspaceLaunch
+from .launch_parse import CompoundLaunch, LaunchConfig, WorkspaceLaunch
 from .variables import resolve_variables
 
 
@@ -187,6 +187,24 @@ def execute_launch(
             tty_fd.close()
 
     return result.returncode
+
+
+def execute_compound(
+    compound: CompoundLaunch,
+    wl: WorkspaceLaunch,
+    workspace_tasks_map: dict | None = None,
+) -> int:
+    """Execute a compound launch config by running each referenced config in sequence."""
+    config_map = {c.name: c for c in wl.configs}
+    for config_name in compound.configurations:
+        config = config_map.get(config_name)
+        if config is None:
+            print(f"Error: compound references unknown config '{config_name}'", file=sys.stderr)
+            return 1
+        rc = execute_launch(config, wl, workspace_tasks_map)
+        if rc != 0:
+            return rc
+    return 0
 
 
 def _run_pre_launch_task(config: LaunchConfig, workspace_tasks_map: dict | None) -> int:
