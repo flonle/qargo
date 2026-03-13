@@ -5,8 +5,9 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import Iterator
 
-from .discover import find_vscode_files
+from .discover import iter_vscode_files
 from .execute import execute_task
 from .launch_execute import execute_compound, execute_launch
 from .launch_parse import CompoundLaunch, LaunchConfig, WorkspaceLaunch, parse_launch_file
@@ -34,52 +35,6 @@ def _build_compound_id(workspace_name: str, name: str) -> str:
     return f"[{workspace_name}] {_COMPOUND_SIGIL}{name}"
 
 
-def _parse_task_id(task_id: str) -> tuple[str, str]:
-    """Split '[workspace] Label' into (workspace, label)."""
-    if task_id.startswith('['):
-        end = task_id.find('] ')
-        if end != -1:
-            return task_id[1:end], task_id[end + 2:]
-    return '', task_id
-
-
-def _compute_workspace_names(
-    workspace_folders: list[Path],
-    root: Path,
-) -> dict[Path, str]:
-    """Compute the shortest unambiguous workspace name for each folder.
-
-    Starts with the basename; if collisions exist, adds more path components
-    relative to *root* (e.g. 'company/backend' vs 'personal/backend').
-    """
-    names: dict[Path, str] = {}
-
-    # Compute relative paths from root
-    def rel_parts(p: Path) -> list[str]:
-        try:
-            return list(p.relative_to(root).parts)
-        except ValueError:
-            return list(p.parts)
-
-    # Try increasing suffix length until all names are unique
-    max_depth = max((len(rel_parts(p)) for p in workspace_folders), default=1)
-    for depth in range(1, max_depth + 1):
-        names = {}
-        for p in workspace_folders:
-            parts = rel_parts(p)
-            suffix_parts = parts[-depth:] if len(parts) >= depth else parts
-            names[p] = '/'.join(suffix_parts)
-
-        # Check for collisions
-        seen: dict[str, int] = {}
-        for name in names.values():
-            seen[name] = seen.get(name, 0) + 1
-        if all(v == 1 for v in seen.values()):
-            break
-
-    return names
-
-
 # Entry = (id, kind, obj, workspace_obj)
 #   kind: "task"     → obj: Task,           workspace_obj: WorkspaceTasks
 #   kind: "launch"   → obj: LaunchConfig,   workspace_obj: WorkspaceLaunch
@@ -87,78 +42,42 @@ def _compute_workspace_names(
 type _Entry = tuple[str, str, Task | LaunchConfig | CompoundLaunch, WorkspaceTasks | WorkspaceLaunch]
 
 
+def _iter_entries(
+    root: Path,
+    extra_excludes: tuple[str, ...],
+) -> Iterator[_Entry]:
+    for kind, path in iter_vscode_files(root, extra_excludes):
+        ws_folder = path.parent.parent
+        if kind == 'task':
+            try:
+                wt = parse_tasks_file(path)
+            except ValueError as e:
+                print(f"Warning: {e}", file=sys.stderr)
+                continue
+            for task in wt.tasks:
+                yield _build_task_id(str(ws_folder), task.label), 'task', task, wt
+        else:
+            try:
+                wl = parse_launch_file(path)
+            except ValueError as e:
+                print(f"Warning: {e}", file=sys.stderr)
+                continue
+            for config in wl.configs:
+                yield _build_launch_id(str(ws_folder), config.name), 'launch', config, wl
+            for compound in wl.compounds:
+                yield _build_compound_id(str(ws_folder), compound.name), 'compound', compound, wl
+
+
 def _load_all(
     root: Path,
     extra_excludes: tuple[str, ...],
-    quiet: bool = False,
 ) -> tuple[list[_Entry], dict[str, WorkspaceTasks]]:
-    """Discover and parse all tasks and launch configs. Returns:
-    - list of (entry_id, kind, obj, workspace_obj)
-    - dict of workspace_folder_str -> WorkspaceTasks  (for preLaunchTask resolution)
-    """
-    tasks_files, launch_files = find_vscode_files(root, extra_excludes)
-    if not quiet:
-        print(
-            f"Scanned: found {len(tasks_files)} tasks.json "
-            f"and {len(launch_files)} launch.json file(s)",
-            file=sys.stderr,
-        )
-
-    workspace_tasks_map: dict[str, WorkspaceTasks] = {}
-    all_wt: list[WorkspaceTasks] = []
-
-    for tf in tasks_files:
-        try:
-            wt = parse_tasks_file(tf)
-        except ValueError as e:
-            if not quiet:
-                print(f"Warning: {e}", file=sys.stderr)
-            continue
-        key = str(wt.workspace_folder)
-        workspace_tasks_map[key] = wt
-        all_wt.append(wt)
-
-    all_wl: list[WorkspaceLaunch] = []
-    for lf in launch_files:
-        try:
-            wl = parse_launch_file(lf)
-        except ValueError as e:
-            if not quiet:
-                print(f"Warning: {e}", file=sys.stderr)
-            continue
-        all_wl.append(wl)
-
-    # Compute workspace names from all unique workspace folders
-    all_folders: list[Path] = []
-    seen_folders: set[Path] = set()
-    for wt in all_wt:
-        if wt.workspace_folder not in seen_folders:
-            all_folders.append(wt.workspace_folder)
-            seen_folders.add(wt.workspace_folder)
-    for wl in all_wl:
-        if wl.workspace_folder not in seen_folders:
-            all_folders.append(wl.workspace_folder)
-            seen_folders.add(wl.workspace_folder)
-
-    name_map = _compute_workspace_names(all_folders, root)
-
-    entries: list[_Entry] = []
-
-    for wt in all_wt:
-        ws_name = name_map.get(wt.workspace_folder, wt.workspace_folder.name)
-        for task in wt.tasks:
-            entry_id = _build_task_id(ws_name, task.label)
-            entries.append((entry_id, 'task', task, wt))
-
-    for wl in all_wl:
-        ws_name = name_map.get(wl.workspace_folder, wl.workspace_folder.name)
-        for config in wl.configs:
-            entry_id = _build_launch_id(ws_name, config.name)
-            entries.append((entry_id, 'launch', config, wl))
-        for compound in wl.compounds:
-            entry_id = _build_compound_id(ws_name, compound.name)
-            entries.append((entry_id, 'compound', compound, wl))
-
+    entries = list(_iter_entries(root, extra_excludes))
+    workspace_tasks_map = {
+        str(ws_obj.workspace_folder): ws_obj
+        for _, kind, _, ws_obj in entries
+        if kind == 'task'
+    }
     return entries, workspace_tasks_map
 
 
@@ -169,9 +88,15 @@ def _load_all(
 def cmd_list(args: argparse.Namespace) -> int:
     root = Path(args.root).resolve()
     extra = tuple(args.exclude) if args.exclude else ()
-    entries, _ = _load_all(root, extra)
-    for entry_id, _, _, _ in entries:
-        print(entry_id)
+    for uid, kind, obj, ws_obj in _iter_entries(root, extra):
+        ws_name = ws_obj.workspace_folder.name
+        if kind == 'task':
+            display = _build_task_id(ws_name, obj.label)
+        elif kind == 'launch':
+            display = _build_launch_id(ws_name, obj.name)
+        else:
+            display = _build_compound_id(ws_name, obj.name)
+        print(f"{display}\t{uid}", flush=True)
     return 0
 
 
@@ -181,7 +106,7 @@ def cmd_info(args: argparse.Namespace) -> int:
     root = Path(args.root).resolve()
     task_id_arg = args.task_id
 
-    entries, _ = _load_all(root, (), quiet=True)
+    entries, _ = _load_all(root, ())
 
     for eid, kind, obj, ws_obj in entries:
         if eid == task_id_arg:

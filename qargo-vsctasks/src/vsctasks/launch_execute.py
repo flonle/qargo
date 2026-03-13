@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import os
+import queue
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 from .launch_parse import CompoundLaunch, LaunchConfig, WorkspaceLaunch
@@ -181,6 +183,7 @@ def execute_launch(
             pass  # no controlling terminal (CI), inherit as-is
 
     try:
+        print(f'Executing the following command: {argv}', file=sys.stderr)
         result = subprocess.run(argv, cwd=str(cwd), env=merged_env, stdin=tty_fd)
     finally:
         if tty_fd:
@@ -189,22 +192,88 @@ def execute_launch(
     return result.returncode
 
 
+_ANSI_COLORS = ['\033[32m', '\033[33m', '\033[34m', '\033[35m', '\033[36m']
+_ANSI_RESET = '\033[0m'
+
+
 def execute_compound(
     compound: CompoundLaunch,
     wl: WorkspaceLaunch,
     workspace_tasks_map: dict | None = None,
 ) -> int:
-    """Execute a compound launch config by running each referenced config in sequence."""
+    """Spawn all configs in parallel, interleave prefixed output, stop on first exit."""
     config_map = {c.name: c for c in wl.configs}
+
+    # Resolve configs and run preLaunchTasks sequentially before spawning
+    resolved: list[tuple[str, list[str], Path, dict]] = []
     for config_name in compound.configurations:
         config = config_map.get(config_name)
         if config is None:
             print(f"Error: compound references unknown config '{config_name}'", file=sys.stderr)
             return 1
-        rc = execute_launch(config, wl, workspace_tasks_map)
-        if rc != 0:
-            return rc
-    return 0
+        if config.pre_launch_task:
+            rc = _run_pre_launch_task(config, workspace_tasks_map)
+            if rc != 0:
+                return rc
+        program, module, args, cwd, extra_env = _resolve_config_variables(config, wl.inputs)
+        argv = _translate_to_argv(config, program, module, args)
+        if argv is None:
+            return 1
+        merged_env = os.environ.copy()
+        merged_env.update(extra_env)
+        resolved.append((config.name, argv, cwd, merged_env))
+
+    use_color = sys.stdout.isatty()
+
+    # Spawn all processes
+    procs: list[tuple[str, subprocess.Popen]] = []
+    for name, argv, cwd, env in resolved:
+        print(f"Spawning: {argv}", file=sys.stderr)
+        proc = subprocess.Popen(
+            argv,
+            cwd=str(cwd),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+        )
+        procs.append((name, proc))
+
+    exit_queue: queue.Queue[tuple[str, int]] = queue.Queue()
+
+    def _reader(name: str, proc: subprocess.Popen, color: str) -> None:
+        prefix = f"{color}[{name}]{_ANSI_RESET} " if use_color else f"[{name}] "
+        for raw_line in proc.stdout:  # type: ignore[union-attr]
+            sys.stdout.write(prefix + raw_line.decode('utf-8', errors='replace').rstrip('\r\n') + '\n')
+            sys.stdout.flush()
+        exit_queue.put((name, proc.wait()))
+
+    threads = []
+    for i, (name, proc) in enumerate(procs):
+        color = _ANSI_COLORS[i % len(_ANSI_COLORS)]
+        t = threading.Thread(target=_reader, args=(name, proc, color), daemon=True)
+        t.start()
+        threads.append(t)
+
+    # Block until first process exits
+    first_name, rc = exit_queue.get()
+    print(f"\n[{first_name}] exited with code {rc}", file=sys.stderr)
+
+    # Terminate remaining processes
+    for _, proc in procs:
+        if proc.poll() is None:
+            proc.terminate()
+    for _, proc in procs:
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+
+    for t in threads:
+        t.join(timeout=2)
+
+    return rc
 
 
 def _run_pre_launch_task(config: LaunchConfig, workspace_tasks_map: dict | None) -> int:

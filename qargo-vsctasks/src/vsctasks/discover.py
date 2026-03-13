@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Iterator
 
 PRUNE_DIRS = frozenset({
     'node_modules', 'dist', 'build', 'out', 'target',
@@ -11,6 +12,32 @@ PRUNE_DIRS = frozenset({
     '.next', '.nuxt', '.turbo', 'coverage',
     '.gradle', '.mvn', 'vendor', 'Pods', '.terraform',
 })
+
+
+def iter_vscode_files(
+    root: Path,
+    extra_excludes: tuple[str, ...] = (),
+) -> Iterator[tuple[str, Path]]:
+    """Yield ('task'|'launch', path) as .vscode files are discovered during the walk."""
+    extra = frozenset(extra_excludes)
+    for dirpath, dirs, files in os.walk(str(root), followlinks=False):
+        current = Path(dirpath)
+        if '.vsctasksignore' in files:
+            dirs.clear()
+            continue
+        if current.name == '.vscode':
+            if 'tasks.json' in files:
+                yield 'task', current / 'tasks.json'
+            if 'launch.json' in files:
+                yield 'launch', current / 'launch.json'
+            dirs.clear()
+            continue
+        dirs[:] = [
+            d for d in dirs
+            if d not in PRUNE_DIRS
+            and (d == '.vscode' or not d.startswith('.'))
+            and d not in extra
+        ]
 
 
 def find_vscode_files(
