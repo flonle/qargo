@@ -6,7 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from .discover import find_launch_files, find_tasks_files
+from .discover import find_vscode_files
 from .execute import execute_task
 from .launch_execute import execute_compound, execute_launch
 from .launch_parse import CompoundLaunch, LaunchConfig, WorkspaceLaunch, parse_launch_file
@@ -96,8 +96,7 @@ def _load_all(
     - list of (entry_id, kind, obj, workspace_obj)
     - dict of workspace_folder_str -> WorkspaceTasks  (for preLaunchTask resolution)
     """
-    tasks_files = find_tasks_files(root, extra_excludes)
-    launch_files = find_launch_files(root, extra_excludes)
+    tasks_files, launch_files = find_vscode_files(root, extra_excludes)
     if not quiet:
         print(
             f"Scanned: found {len(tasks_files)} tasks.json "
