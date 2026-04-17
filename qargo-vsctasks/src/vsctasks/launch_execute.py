@@ -177,8 +177,19 @@ def execute_launch(
 
     tty_fd = None
     if not sys.stdin.isatty():
+        # Prefer the real PTY slave path (e.g. /dev/ttys003) over the /dev/tty alias.
+        # On macOS, kqueue EVFILT_READ returns EINVAL on /dev/tty but works on the
+        # actual PTY slave device — which matters for prompt_toolkit / IPython.
+        tty_path = None
+        for check_fd in (2, 1):  # stderr first, then stdout
+            if os.isatty(check_fd):
+                try:
+                    tty_path = os.ttyname(check_fd)
+                    break
+                except OSError:
+                    pass
         try:
-            tty_fd = open('/dev/tty', 'r')
+            tty_fd = os.open(tty_path or '/dev/tty', os.O_RDWR)
         except OSError:
             pass  # no controlling terminal (CI), inherit as-is
 
@@ -186,8 +197,8 @@ def execute_launch(
         print(f'Executing the following command: {argv}', file=sys.stderr)
         result = subprocess.run(argv, cwd=str(cwd), env=merged_env, stdin=tty_fd)
     finally:
-        if tty_fd:
-            tty_fd.close()
+        if tty_fd is not None:
+            os.close(tty_fd)
 
     return result.returncode
 
