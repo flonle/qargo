@@ -32,48 +32,9 @@ uv tool install .
 
 Or run from source: `uv run qws ...`
 
-## Commands
+## Usage
 
-### `qws create <name>`
-
-Create a new workspace. Adds a git worktree for each sub-repo on a fresh branch
-`workspace/<name>`, then rsyncs untracked files from master.
-
-```bash
-qws create cross-dock-incidents
-```
-
-Flags:
-- `--no-symlink-heavy` — copy `node_modules` etc. instead of symlinking them.
-
-### `qws remove <name>`
-
-Deregister all worktrees and delete the workspace directory.
-
-```bash
-qws remove cross-dock-incidents
-```
-
-Flags:
-- `--force` — remove worktrees even with uncommitted changes.
-
-### `qws sync [name]`
-
-Re-rsync untracked/gitignored files from master into a workspace (or all
-workspaces if `name` is omitted). Useful after adding new local config files in
-master that you want mirrored.
-
-### `qws status`
-
-Show `git status --short --branch` for every sub-repo. If run from inside master
-or a workspace, only that root is shown; otherwise all roots are listed.
-
-Each header also shows the number of Claude Code sessions recorded for that
-path (`✳ N`, read from `~/.claude/projects/`).
-
-### `qws list`
-
-List workspace directories.
+See `qws --help`
 
 ## Shell integration
 
