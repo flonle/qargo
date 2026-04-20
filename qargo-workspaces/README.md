@@ -43,10 +43,14 @@ job in three lines. Drop this into your `.zshrc` / `.bashrc` to fzf-pick a
 workspace and `cd` into it:
 
 ```sh
-workon() {
-    cd ~/.qargo-workspaces/"$(ls ~/.qargo-workspaces | fzf)"
+workon () {
+    local dir="$HOME/.qargo-workspaces/$(ls ~/.qargo-workspaces | fzf)"
+    print -s "cd $dir"
+    cd "$dir"
 }
 ```
+
+> The `print -s` is to add the `cd` command to your shell history so that you can ↑ to it later.
 
 ## Notes
 
