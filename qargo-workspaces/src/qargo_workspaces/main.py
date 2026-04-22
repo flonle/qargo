@@ -137,7 +137,7 @@ def create(name: str, no_symlink_heavy: bool) -> None:
     for repo in sub_repos:
         worktree = workspace / repo.name
         click.echo(f"  Adding worktree: {repo.name}/ (branch: {branch})")
-        git("worktree", "add", str(worktree), "-b", branch, cwd=repo)
+        git("worktree", "add", str(worktree), "-b", branch, "origin/master", cwd=repo)
 
     click.echo("Syncing untracked files...")
     _do_sync(workspace, symlink_heavy=not no_symlink_heavy)
